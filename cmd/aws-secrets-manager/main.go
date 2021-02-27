@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 
@@ -64,7 +65,6 @@ func main() {
 	if result.SecretString != nil {
 		secretString = *result.SecretString
 		writeOutput(secretString)
-		writeOutput("Finished init container")
 	} else {
 		decodedBinarySecretBytes := make([]byte, base64.StdEncoding.DecodedLen(len(result.SecretBinary)))
 		len, err := base64.StdEncoding.Decode(decodedBinarySecretBytes, result.SecretBinary)
@@ -76,14 +76,38 @@ func main() {
 		writeOutput(decodedBinarySecret)
 	}
 }
+
+func writeEnvFile(key, value string) {
+	f, err := os.OpenFile("/tmp/secret", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+
+	if err != nil {
+		return
+	}
+	defer f.Close()
+
+	f.WriteString(fmt.Sprintf("export %s=%s;\n", key, value))
+}
+
 func writeOutput(output string) {
+	// coming in as json. parse and extract the key and value for
+	// writing to temp file as a structure env file
+	var uj map[string]string
+	if err := json.Unmarshal([]byte(output), &uj); err != nil {
+		return
+	}
+
 	f, err := os.OpenFile("/tmp/secret", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return
 	}
 	defer f.Close()
 
-	f.WriteString(
-		fmt.Sprintf("secret: %s\n", output),
-	)
+	// the json read in should only ever have 1 key value pair,
+	// however, iterate over it just in case anyhow.
+	for k, v := range uj {
+		f.WriteString(
+			fmt.Sprintf("export %s=%s;\n", k, v),
+		)
+	}
+
 }

@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/google/uuid"
 	v1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -33,24 +34,23 @@ const (
 	]`
 )
 
-var podsInitContainerPatch string = `[{"op":"add","path":"/spec/initContainers","value":[{"image":"%v","name":"secrets-init-container","volumeMounts":[{"name":"secret-vol","mountPath":"/tmp"}],"env":[{"name": "SECRET_ARN","valueFrom": {"fieldRef": {"fieldPath": "metadata.annotations['secrets.k8s.aws/secret-arn']"}}}],"resources":{}}]},{"op":"add","path":"/spec/volumes/-","value":{"emptyDir": {"medium": "Memory"},"name": "secret-vol"}}`
+//var podsInitContainerPatch string = `[{"op":"add","path":"/spec/initContainers","value":[{"image":"%v","name":"secrets-init-container","volumeMounts":[{"name":"secret-vol","mountPath":"/tmp"}],"env":[{"name": "SECRET_ARN","valueFrom": {"fieldRef": {"fieldPath": "metadata.annotations['secrets.k8s.aws/secret-arn']"}}}],"resources":{}}]},{"op":"add","path":"/spec/volumes/-","value":{"emptyDir": {"medium": "Memory"},"name": "secret-vol"}}`
 
+// is the operation for patching for the init containers. Needs an array of init containers
+// to be added to the incoming manifest
 var initContainersShell string = `{"op":"add","path":"/spec/initContainers","value":[%s]},`
 
-// array entry with values to be added. Last entry needs the , stripped off
+// Init container array entry with values to be added. Last entry needs the , stripped off
+// takes 3 values, image name, a number for the container and annotation name from the
+// the incoming manifest
 var initContainerEntry string = `{"image":"%v","name":"secrets-init-container-%d","volumeMounts":[{"name":"secret-vol","mountPath":"/tmp"}],"env":[{"name": "SECRET_ARN","valueFrom": {"fieldRef": {"fieldPath": "metadata.annotations['%v']"}}}],"resources":{}},`
-
-// this modificaiton will add an init container to the pod spec. It needs to be populated
-// with the init container image name, and the ARN value of the secret to have the container
-// resolve.
-var podsInitContainerPatchEntry string = `{"op":"add","path":"/spec/initContainers","value":[{"image":"%v","name":"secrets-init-container-%d","volumeMounts":[{"name":"secret-vol","mountPath":"/tmp"}],"env":[{"name": "SECRET_ARN","valueFrom": {"fieldRef": {"fieldPath": "metadata.annotations['%v']"}}}],"resources":{}}]},`
 
 // this modification will the secrets in memory volume which each init container will populate
 // and the main container will use to pull the secrets in.
 var secretsMountPointPatch string = `{"op":"add","path":"/spec/volumes/-","value":{"emptyDir": {"medium": "Memory"},"name": "secret-vol"}}`
 
-var podsInitContainerPatchRange string = `[
-			    {"op":"add","path":"/spec/initContainers","value":[{"image":"%v","name":"secrets-init-container","volumeMounts":[{"name":"secret-vol","mountPath":"/tmp"}],"env":[{"name": "SECRET_ARN","valueFrom": {"fieldRef": {"fieldPath": "metadata.annotations['%v']"}}}],"resources":{}}]},{"op":"add","path":"/spec/volumes/-","value":{"emptyDir": {"medium": "Memory"},"name": "secret-vol"}}`
+//var podsInitContainerPatchRange string = `[
+//		    {"op":"add","path":"/spec/initContainers","value":[{"image":"%v","name":"secrets-init-container","volumeMounts":[{"name":"secret-vol","mountPath":"/tmp"}],"env":[{"name": "SECRET_ARN","valueFrom": {"fieldRef": {"fieldPath": "metadata.annotations['%v']"}}}],"resources":{}}]},{"op":"add","path":"/spec/volumes/-","value":{"emptyDir": {"medium": "Memory"},"name": "secret-vol"}}`
 
 // only allow pods to pull images from specific registry.
 func admitPods(ar v1.AdmissionReview) *v1.AdmissionResponse {
@@ -97,7 +97,8 @@ func admitPods(ar v1.AdmissionReview) *v1.AdmissionResponse {
 }
 
 func processAnnotations(pod *corev1.Pod) string {
-	var patches []string
+	//var patches []string
+	var patch string
 	initCount := 0
 	for annotation, value := range pod.ObjectMeta.Annotations {
 		if strings.Contains(annotation, "secrets.k8s.aws") {
@@ -106,16 +107,13 @@ func processAnnotations(pod *corev1.Pod) string {
 				continue
 			}
 			klog.Info(value)
-			patches = append(patches, fmt.Sprintf(initContainerEntry, sidecarImage, initCount, annotation))
+			patchPart := fmt.Sprintf(initContainerEntry, sidecarImage, initCount, annotation)
+			//patches = append(patches, patchPart)
+			patch += patchPart
 			initCount++
-			klog.Info(patches[len(patches)-1])
+			//klog.Info(patches[len(patches)-1])
+			klog.Info(patchPart)
 		}
-	}
-
-	// create single string patch json
-	var patch string = ""
-	for _, p := range patches {
-		patch += p
 	}
 
 	// trim off the trailing ,
@@ -154,9 +152,7 @@ func mutatePods(ar v1.AdmissionReview) *v1.AdmissionResponse {
 				if annotation == "secrets.k8s.aws/sidecarInjectorWebhook" {
 					continue
 				}
-				//klog.Info(value)
-				patches = append(patches, fmt.Sprintf(podsInitContainerPatchEntry, sidecarImage, annotation))
-				//klog.Info(patches[len(patches)-1])
+				patches = append(patches, fmt.Sprintf(initContainerEntry, sidecarImage, annotation))
 			}
 		}
 
@@ -165,27 +161,9 @@ func mutatePods(ar v1.AdmissionReview) *v1.AdmissionResponse {
 			return false
 		}
 
-		// compile the patches into one big patch clause
-		var patch string = `[`
-		for _, p := range patches {
-			//patch = patch + fmt.Sprintf("%s,", p)
-			patch += p
-		}
-
-		// Add the mount patch once
-		patch += secretsMountPointPatch
-
-		// trim last , from patch statement
-		// patch = patch[:len(patch)-1]
-		//klog.Info(fmt.Sprintf("Patch statement: \n*****\n%s\n******\n", patch))
-
-		_, arnOk := pod.ObjectMeta.Annotations["secrets.k8s.aws/secret-arn"]
-		if arnOk == false {
-			return false
-		}
 		return !hasContainer(pod.Spec.InitContainers, "secrets-init-container")
 	}
-	return applyPodPatch(ar, shouldPatchPod, fmt.Sprintf(podsInitContainerPatch, sidecarImage))
+	return applyPodPatch(ar, shouldPatchPod /*fmt.Sprintf(podsInitContainerPatch, sidecarImage)*/, "")
 }
 
 func mutatePodsSidecar(ar v1.AdmissionReview) *v1.AdmissionResponse {
@@ -246,8 +224,17 @@ func applyPodPatch(ar v1.AdmissionReview, shouldPatchPod func(*corev1.Pod) bool,
 		patch = processAnnotations(&pod)
 		klog.Info(fmt.Sprintf("Pre Processed Patch info:\n*****\n%s\n******", patch))
 
+		// generate a random mount location to mitigate LFI
+		mountLocation := uuid.New()
+
+		klog.Info(
+			fmt.Sprintf("Will mount secrets in main conatiners to %s", mountLocation),
+		)
+
 		var path = "{\"op\": \"add\",\"path\": \"/spec/containers/"
-		var value = "/volumeMounts/-\",\"value\": {\"mountPath\": \"/tmp/\",\"name\": \"secret-vol\"}}"
+		//var value = fmt.Sprintf("/volumeMounts/-\",\"value\": {\"mountPath\": \"/tmp/%s\",\"name\": \"secret-vol\"}}", mountLocation)
+		var value = "/volumeMounts/-\",\"value\": {\"mountPath\": \"/tmp\",\"name\": \"secret-vol\"}}"
+
 		var volMounts = ""
 
 		// Apply secrets mount to each container in the main pod spec
