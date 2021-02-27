@@ -64,6 +64,7 @@ func main() {
 	if result.SecretString != nil {
 		secretString = *result.SecretString
 		writeOutput(secretString)
+		writeOutput("Finished init container")
 	} else {
 		decodedBinarySecretBytes := make([]byte, base64.StdEncoding.DecodedLen(len(result.SecretBinary)))
 		len, err := base64.StdEncoding.Decode(decodedBinarySecretBytes, result.SecretBinary)
@@ -76,11 +77,13 @@ func main() {
 	}
 }
 func writeOutput(output string) {
-	f, err := os.Create("/tmp/secret")
+	f, err := os.OpenFile("/tmp/secret", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return
 	}
 	defer f.Close()
 
-	f.WriteString(output)
+	f.WriteString(
+		fmt.Sprintf("secret: %s\n", output),
+	)
 }
