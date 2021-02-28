@@ -235,17 +235,48 @@ func applyPodPatch(ar v1.AdmissionReview, shouldPatchPod func(*corev1.Pod) bool,
 		//var value = fmt.Sprintf("/volumeMounts/-\",\"value\": {\"mountPath\": \"/tmp/%s\",\"name\": \"secret-vol\"}}", mountLocation)
 		var value = "/volumeMounts/-\",\"value\": {\"mountPath\": \"/tmp\",\"name\": \"secret-vol\"}}"
 
+		//envPatch := `{"op":"add","path":"/spec/containers/%d/env/-","value":[{"name":"SEC_LOC","value":"/tmp/%s"}]}`
+		envPatch := `{
+			"op":"add",
+			"path":"/spec/containers/0/env/-",
+			"value":{
+				"name":"SEC_LOC",
+				"value":"/tmp/dsfd"
+			}
+		}`
+		//testPatch := `{"op":"add","path":"/spec/template/spec/containers/env/-","value":[{"name":"NO_PROXY","value":"192.168.1.1"}]}`
+		/*		testPatch := `
+				{
+				  "op": "add",
+				  "path": "/spec/template/spec/containers/0/env/-",
+				  "value": {
+					"name": "KUBERNETES_NAMESPACE",
+					"valueFrom": {
+						"fieldRef": {
+							"fieldPath": "metadata.namespace"
+						}
+					}
+				  }
+				}
+			  `*/
+		//testPatch := `{"op":"merge","path":"/spec/containers/0/env/-","value":[]}`
 		var volMounts = ""
+		var envPatches = ""
 
 		// Apply secrets mount to each container in the main pod spec
 		for i := range pod.Spec.Containers {
+			klog.Info(fmt.Sprintf("container: %s", i))
 			if i == 0 {
 				volMounts = path + strconv.Itoa(i) + value
+				envPatches = fmt.Sprintf(envPatch, i, mountLocation)
 			} else {
 				volMounts = volMounts + "," + path + strconv.Itoa(i) + value
+				envPatches = envPatches + "," + fmt.Sprintf(envPatch, i, mountLocation)
 			}
 		}
+		//patch = patch + "," + volMounts + "," + envPatches + "]"
 		patch = patch + "," + volMounts + "]"
+		patch = "[" + envPatch + "]"
 		klog.Info(fmt.Sprintf("Post Processed Patch info:\n*****\n%s\n******", patch))
 		reviewResponse.Patch = []byte(patch)
 		pt := v1.PatchTypeJSONPatch
@@ -291,4 +322,33 @@ func denySpecificAttachment(ar v1.AdmissionReview) *v1.AdmissionResponse {
 			Message: "attaching to pod 'to-be-attached-pod' is not allowed",
 		},
 	}
+}
+
+type patchOperation struct {
+	Op    string      `json:"op"`
+	Path  string      `json:"path"`
+	Value interface{} `json:"value,omitempty"`
+}
+
+// addEnv performs the mutation(s) needed to add the extra environment variables to the target
+// resource
+func addEnv(target, envVars []corev1.EnvVar, basePath string) (patch []patchOperation) {
+	first := len(target) == 0
+	var value interface{}
+	for _, envVar := range envVars {
+		value = envVar
+		path := basePath
+		if first {
+			first = false
+			value = []corev1.EnvVar{envVar}
+		} else {
+			path = path + "/-"
+		}
+		patch = append(patch, patchOperation{
+			Op:    "add",
+			Path:  path,
+			Value: value,
+		})
+	}
+	return patch
 }
