@@ -34,8 +34,6 @@ const (
 	]`
 )
 
-//var podsInitContainerPatch string = `[{"op":"add","path":"/spec/initContainers","value":[{"image":"%v","name":"secrets-init-container","volumeMounts":[{"name":"secret-vol","mountPath":"/tmp"}],"env":[{"name": "SECRET_ARN","valueFrom": {"fieldRef": {"fieldPath": "metadata.annotations['secrets.k8s.aws/secret-arn']"}}}],"resources":{}}]},{"op":"add","path":"/spec/volumes/-","value":{"emptyDir": {"medium": "Memory"},"name": "secret-vol"}}`
-
 // is the operation for patching for the init containers. Needs an array of init containers
 // to be added to the incoming manifest
 var initContainersShell string = `{"op":"add","path":"/spec/initContainers","value":[%s]},`
@@ -48,9 +46,6 @@ var initContainerEntry string = `{"image":"%v","name":"secrets-init-container-%d
 // this modification will the secrets in memory volume which each init container will populate
 // and the main container will use to pull the secrets in.
 var secretsMountPointPatch string = `{"op":"add","path":"/spec/volumes/-","value":{"emptyDir": {"medium": "Memory"},"name": "secret-vol"}}`
-
-//var podsInitContainerPatchRange string = `[
-//		    {"op":"add","path":"/spec/initContainers","value":[{"image":"%v","name":"secrets-init-container","volumeMounts":[{"name":"secret-vol","mountPath":"/tmp"}],"env":[{"name": "SECRET_ARN","valueFrom": {"fieldRef": {"fieldPath": "metadata.annotations['%v']"}}}],"resources":{}}]},{"op":"add","path":"/spec/volumes/-","value":{"emptyDir": {"medium": "Memory"},"name": "secret-vol"}}`
 
 // only allow pods to pull images from specific registry.
 func admitPods(ar v1.AdmissionReview) *v1.AdmissionResponse {
@@ -97,21 +92,27 @@ func admitPods(ar v1.AdmissionReview) *v1.AdmissionResponse {
 }
 
 func processAnnotations(pod *corev1.Pod) string {
-	//var patches []string
 	var patch string
 	initCount := 0
 	for annotation, value := range pod.ObjectMeta.Annotations {
+		// a note about the annotation
+		// using SSM, its a key value store which always returns
+		// the keys in the json form { "key": "value" }. So, when
+		// we set this up, it gets exported as KEY=VALUE. So, the
+		// annotation values after the main clause, dont matter as
+		// log as they are unique. We can look to use them in the case
+		// where we dont get a key,value pair back. But for now, just
+		// ignoring them. K8s will enforce they are globally unique
 		if strings.Contains(annotation, "secrets.k8s.aws") {
+
 			// ignore the injector turn on flag
 			if annotation == "secrets.k8s.aws/sidecarInjectorWebhook" {
 				continue
 			}
 			klog.Info(value)
 			patchPart := fmt.Sprintf(initContainerEntry, sidecarImage, initCount, annotation)
-			//patches = append(patches, patchPart)
 			patch += patchPart
 			initCount++
-			//klog.Info(patches[len(patches)-1])
 			klog.Info(patchPart)
 		}
 	}
@@ -141,29 +142,27 @@ func processAnnotations(pod *corev1.Pod) string {
 
 func mutatePods(ar v1.AdmissionReview) *v1.AdmissionResponse {
 	shouldPatchPod := func(pod *corev1.Pod) bool {
-		//klog.Info(pod.ObjectMeta.Annotations)
 
 		// loop over looking for the annotations needed to query
 		// for secrets from SSM.
-		var patches []string
+		secretFound := false
 		for annotation := range pod.ObjectMeta.Annotations {
 			if strings.Contains(annotation, "secrets.k8s.aws") {
 				// ignore the injector turn on flag
 				if annotation == "secrets.k8s.aws/sidecarInjectorWebhook" {
 					continue
 				}
-				patches = append(patches, fmt.Sprintf(initContainerEntry, sidecarImage, annotation))
+				secretFound = true
 			}
 		}
 
-		// check if we found annotations to patch
-		if len(patches) == 0 {
+		if !secretFound {
 			return false
 		}
 
 		return !hasContainer(pod.Spec.InitContainers, "secrets-init-container")
 	}
-	return applyPodPatch(ar, shouldPatchPod /*fmt.Sprintf(podsInitContainerPatch, sidecarImage)*/, "")
+	return applyPodPatch(ar, shouldPatchPod, "")
 }
 
 func mutatePodsSidecar(ar v1.AdmissionReview) *v1.AdmissionResponse {
@@ -201,8 +200,6 @@ func applyPodPatch(ar v1.AdmissionReview, shouldPatchPod func(*corev1.Pod) bool,
 		return nil
 	}
 
-	//klog.Info(fmt.Sprintf("Pre Processed Patch info:\n*****\n%s\n******", patch))
-
 	raw := ar.Request.Object.Raw
 	pod := corev1.Pod{}
 	deserializer := codecs.UniversalDeserializer()
@@ -232,34 +229,9 @@ func applyPodPatch(ar v1.AdmissionReview, shouldPatchPod func(*corev1.Pod) bool,
 		)
 
 		var path = "{\"op\": \"add\",\"path\": \"/spec/containers/"
-		//var value = fmt.Sprintf("/volumeMounts/-\",\"value\": {\"mountPath\": \"/tmp/%s\",\"name\": \"secret-vol\"}}", mountLocation)
-		var value = "/volumeMounts/-\",\"value\": {\"mountPath\": \"/tmp\",\"name\": \"secret-vol\"}}"
+		var value = fmt.Sprintf("/volumeMounts/-\",\"value\": {\"mountPath\": \"/tmp/%s\",\"name\": \"secret-vol\"}}", mountLocation)
 
-		//envPatch := `{"op":"add","path":"/spec/containers/%d/env/-","value":[{"name":"SEC_LOC","value":"/tmp/%s"}]}`
-		envPatch := `{
-			"op":"add",
-			"path":"/spec/containers/0/env/-",
-			"value":{
-				"name":"SEC_LOC",
-				"value":"/tmp/dsfd"
-			}
-		}`
-		//testPatch := `{"op":"add","path":"/spec/template/spec/containers/env/-","value":[{"name":"NO_PROXY","value":"192.168.1.1"}]}`
-		/*		testPatch := `
-				{
-				  "op": "add",
-				  "path": "/spec/template/spec/containers/0/env/-",
-				  "value": {
-					"name": "KUBERNETES_NAMESPACE",
-					"valueFrom": {
-						"fieldRef": {
-							"fieldPath": "metadata.namespace"
-						}
-					}
-				  }
-				}
-			  `*/
-		//testPatch := `{"op":"merge","path":"/spec/containers/0/env/-","value":[]}`
+		envPatch := `{"op":"add","path":"/spec/containers/%d/env/-","value":{"name":"SEC_LOC","value":"/tmp/%s"}}`
 		var volMounts = ""
 		var envPatches = ""
 
@@ -274,15 +246,13 @@ func applyPodPatch(ar v1.AdmissionReview, shouldPatchPod func(*corev1.Pod) bool,
 				envPatches = envPatches + "," + fmt.Sprintf(envPatch, i, mountLocation)
 			}
 		}
-		//patch = patch + "," + volMounts + "," + envPatches + "]"
-		patch = patch + "," + volMounts + "]"
-		patch = "[" + envPatch + "]"
+		patch = patch + "," + volMounts + "," + envPatches + "]"
 		klog.Info(fmt.Sprintf("Post Processed Patch info:\n*****\n%s\n******", patch))
 		reviewResponse.Patch = []byte(patch)
 		pt := v1.PatchTypeJSONPatch
 		reviewResponse.PatchType = &pt
 	}
-	//klog.Info(&reviewResponse)
+	klog.Info(&reviewResponse)
 	return &reviewResponse
 }
 
@@ -322,33 +292,4 @@ func denySpecificAttachment(ar v1.AdmissionReview) *v1.AdmissionResponse {
 			Message: "attaching to pod 'to-be-attached-pod' is not allowed",
 		},
 	}
-}
-
-type patchOperation struct {
-	Op    string      `json:"op"`
-	Path  string      `json:"path"`
-	Value interface{} `json:"value,omitempty"`
-}
-
-// addEnv performs the mutation(s) needed to add the extra environment variables to the target
-// resource
-func addEnv(target, envVars []corev1.EnvVar, basePath string) (patch []patchOperation) {
-	first := len(target) == 0
-	var value interface{}
-	for _, envVar := range envVars {
-		value = envVar
-		path := basePath
-		if first {
-			first = false
-			value = []corev1.EnvVar{envVar}
-		} else {
-			path = path + "/-"
-		}
-		patch = append(patch, patchOperation{
-			Op:    "add",
-			Path:  path,
-			Value: value,
-		})
-	}
-	return patch
 }
